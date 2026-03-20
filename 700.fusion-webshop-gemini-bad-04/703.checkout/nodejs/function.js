@@ -1,24 +1,17 @@
 // 700.fusion-webshop/703.checkout/nodejs/function.js
 const http = require('http');
-const https = require('https');
-let keepAliveAgent = new http.Agent({ keepAlive: true });
 const { Worker } = require("worker_threads")
 
 const PROXY_URL = process.env.PROXY_URL || '172.17.0.1:8080';
+const sharedAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
 
 function parseUrl(url) {
-    let protocol = 'http:';
-    if (url.startsWith('https://')) {
-        protocol = 'https:';
-        url = url.substring(8); // 去掉 'https://'
-    } else if (url.startsWith('http://')) {
-        url = url.substring(7); // 去掉 'http://'
-    }
+    url = url.replace(/^https?:\/\//, '');
     if (url.includes(':')) {
         const [hostname, port] = url.split(':');
-        return { hostname, port: parseInt(port), protocol };
+        return { hostname, port: parseInt(port) };
     } else {
-        return { hostname: url, port: 8080, protocol };
+        return { hostname: url, port: 8080 };
     }
 }
 
@@ -39,13 +32,13 @@ async function resolveFunctionUrl(functionName) {
 
     const { hostname, port } = parseUrl(PROXY_URL);
     const resolveOptions = {
-        agent: keepAliveAgent,
         hostname: hostname,
         port: port,
         path: `/resolve/${functionName}`,
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
-        timeout: 300000
+        timeout: 300000,
+        agent: sharedAgent
     };
 
     const functionInfo = await new Promise((resolveUrl, rejectUrl) => {
@@ -53,8 +46,8 @@ async function resolveFunctionUrl(functionName) {
             const chunks = [];
             res.on('data', (chunk) => { chunks.push(chunk); });
             res.on('end', () => {
-                const data = Buffer.concat(chunks).toString('utf8');
                 try {
+                    const data = Buffer.concat(chunks).toString('utf8');
                     const parsed = JSON.parse(data);
                     if (parsed.error) {
                         rejectUrl(new Error(`Proxy resolve failed: ${parsed.error}`));
@@ -94,26 +87,27 @@ async function invokeFunctionViaProxy(functionName, event) {
 
             const { hostname: funcHostname, port: funcPort } = parseUrl(functionInfo.url);
             const eventStr = JSON.stringify(event);
+            const eventBuf = Buffer.from(eventStr);
             const callOptions = {
-                agent: keepAliveAgent,
                 hostname: funcHostname,
                 port: funcPort,
                 path: '/',
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(eventStr)
+                    'Content-Length': eventBuf.length
                 },
-                timeout: 600000
+                timeout: 600000,
+                agent: sharedAgent
             };
 
             const req = http.request(callOptions, (res) => {
                 const chunks = [];
-                res.on('data', (chunk) => { chunks.push(chunk); });
-                res.on('end', () => {
+            res.on('data', (chunk) => { chunks.push(chunk); });
+            res.on('end', () => {
+                try {
                     const data = Buffer.concat(chunks).toString('utf8');
-                    try {
-                        const parsed = JSON.parse(data);
+                    const parsed = JSON.parse(data);
 
                         // 处理 SeBS 响应格式
                         if (parsed.result && parsed.result.output) {
@@ -156,7 +150,7 @@ async function invokeFunctionViaProxy(functionName, event) {
 
             req.on('error', (e) => reject(new Error(`Function call failed to ${functionInfo.url}: ` + e.message)));
             req.on('timeout', () => { req.destroy(); reject(new Error(`Function call timeout to ${functionInfo.url}`)); });
-            req.write(eventStr);
+            req.write(typeof eventBuf !== 'undefined' ? eventBuf : eventStr);
             req.end();
         } catch (e) {
             reject(e);
@@ -170,18 +164,19 @@ async function invokeFunctionViaProxy(functionName, event) {
 function invokeFunctionAsync(functionName, event) {
     resolveFunctionUrl(functionName).then(functionInfo => {
         const eventStr = JSON.stringify(event);
+        const eventBuf = Buffer.from(eventStr);
         const { hostname: funcHostname, port: funcPort } = parseUrl(functionInfo.url);
         const callOptions = {
-            agent: keepAliveAgent,
             hostname: funcHostname,
             port: funcPort,
             path: '/',
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(eventStr)
+                'Content-Length': eventBuf.length
             },
-            timeout: 600000
+            timeout: 600000,
+                agent: sharedAgent
         };
 
         const req = http.request(callOptions, (res) => {
@@ -198,7 +193,7 @@ function invokeFunctionAsync(functionName, event) {
             console.error(`Async call to ${functionName} timeout`);
         });
 
-        req.write(eventStr);
+        req.write(typeof eventBuf !== 'undefined' ? eventBuf : eventStr);
         req.end();
     }).catch(e => {
         console.error(`Async resolve ${functionName} failed:`, e.message);
@@ -226,7 +221,7 @@ function cpu_intensive(baseNumber) {
 exports.handler = async function(event) {
     try {
         let input = typeof event === 'string' ? JSON.parse(event) : event;
-        console.log("checkout", input);
+        
 
         let userId = input.userId || "0"
         let currencyPref = input.currency || "USD"
@@ -259,25 +254,19 @@ exports.handler = async function(event) {
         // 处理产品列表数据（兼容新旧格式）
         let products = productsList.products || (productsList.productsList && productsList.productsList.products) || productsList || [];
 
-        let orderProducts = cartItems.map(item => {
+        let orderProducts = await Promise.all(cartItems.map(async item => {
             let itemId = item.itemId?.S || item.itemId || item.id;
             let pr = products.find(pr => pr.id == itemId);
-            return pr;
-        }).filter(p => p != null);
-        
-        if (orderProducts.length > 0) {
-            let pricesToConvert = orderProducts.map(pr => ({ from: pr.priceUsd }));
-            let convertedPrices = await invokeFunctionViaProxy("currency", {
-                prices: pricesToConvert,
+            if (!pr) return null;
+            let newPrice = await invokeFunctionViaProxy("currency", {
+                from: pr.priceUsd,
                 toCode: currencyPref
             });
-            
-            orderProducts = orderProducts.map((pr, index) => {
-                pr.price = convertedPrices[index];
-                return pr;
-            });
-        }
-        console.log("OrderProducts", orderProducts)
+            pr.price = newPrice
+            return pr
+        }))
+        orderProducts = orderProducts.filter(p => p !== null);
+        
 
         let shipmentPrice = await invokeFunctionViaProxy("shipmentquote", {userId: userId, items: cartItems});
         let convertedShipmentPrice = await invokeFunctionViaProxy("currency", {

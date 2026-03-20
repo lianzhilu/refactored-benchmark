@@ -1,23 +1,17 @@
-// 700.fusion-webshop/701.addcartitem/nodejs/function.js
+// 700.fusion-webshop/709.getcart/nodejs/function.js
 const http = require('http');
-const https = require('https');
-let keepAliveAgent = new http.Agent({ keepAlive: true });
+
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 
 const PROXY_URL = process.env.PROXY_URL || '172.17.0.1:8080';
 
 function parseUrl(url) {
-    let protocol = 'http:';
-    if (url.startsWith('https://')) {
-        protocol = 'https:';
-        url = url.substring(8); // 去掉 'https://'
-    } else if (url.startsWith('http://')) {
-        url = url.substring(7); // 去掉 'http://'
-    }
+    url = url.replace(/^https?:\/\//, '');
     if (url.includes(':')) {
         const [hostname, port] = url.split(':');
-        return { hostname, port: parseInt(port), protocol };
+        return { hostname, port: parseInt(port) };
     } else {
-        return { hostname: url, port: 8080, protocol };
+        return { hostname: url, port: 8080 };
     }
 }
 
@@ -36,24 +30,22 @@ async function resolveFunctionUrl(functionName) {
         return { ...cached };
     }
 
-    const { hostname, port, protocol } = parseUrl(PROXY_URL);
+    const { hostname, port } = parseUrl(PROXY_URL);
     const resolveOptions = {
-        agent: protocol === 'https:' ? new https.Agent({ keepAlive: true }) : keepAliveAgent,
         hostname: hostname,
         port: port,
         path: `/resolve/${functionName}`,
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
-        timeout: 300000
+        timeout: 300000,
+        agent: httpAgent
     };
 
     const functionInfo = await new Promise((resolveUrl, rejectUrl) => {
-        const requestModule = protocol === 'https:' ? https : http;
-        const req = requestModule.request(resolveOptions, (res) => {
-            const chunks = [];
-            res.on('data', (chunk) => { chunks.push(chunk); });
+        const req = http.request(resolveOptions, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
             res.on('end', () => {
-                const data = Buffer.concat(chunks).toString('utf8');
                 try {
                     const parsed = JSON.parse(data);
                     if (parsed.error) {
@@ -92,10 +84,9 @@ async function invokeFunctionViaProxy(functionName, event) {
         try {
             const functionInfo = await resolveFunctionUrl(functionName);
 
-            const { hostname: funcHostname, port: funcPort, protocol } = parseUrl(functionInfo.url);
+            const { hostname: funcHostname, port: funcPort } = parseUrl(functionInfo.url);
             const eventStr = JSON.stringify(event);
             const callOptions = {
-                agent: protocol === 'https:' ? new https.Agent({ keepAlive: true }) : keepAliveAgent,
                 hostname: funcHostname,
                 port: funcPort,
                 path: '/',
@@ -104,15 +95,14 @@ async function invokeFunctionViaProxy(functionName, event) {
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(eventStr)
                 },
-                timeout: 600000
+                timeout: 600000,
+                agent: httpAgent
             };
 
-            const requestModule = protocol === 'https:' ? https : http;
-            const req = requestModule.request(callOptions, (res) => {
-                const chunks = [];
-                res.on('data', (chunk) => { chunks.push(chunk); });
+            const req = http.request(callOptions, (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
                 res.on('end', () => {
-                    const data = Buffer.concat(chunks).toString('utf8');
                     try {
                         const parsed = JSON.parse(data);
 
@@ -165,71 +155,52 @@ async function invokeFunctionViaProxy(functionName, event) {
     });
 }
 
-/**
- * 异步调用函数（不等待结果，fire-and-forget）
- */
-function invokeFunctionAsync(functionName, event) {
-    resolveFunctionUrl(functionName).then(functionInfo => {
-        const eventStr = JSON.stringify(event);
-        const { hostname: funcHostname, port: funcPort, protocol } = parseUrl(functionInfo.url);
-        const callOptions = {
-            agent: protocol === 'https:' ? new https.Agent({ keepAlive: true }) : keepAliveAgent,
-            hostname: funcHostname,
-            port: funcPort,
-            path: '/',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(eventStr)
-            },
-            timeout: 600000
-        };
-
-        const requestModule = protocol === 'https:' ? https : http;
-        const req = requestModule.request(callOptions, (res) => {
-            res.on('data', () => {});
-            res.on('end', () => {});
-        });
-
-        req.on('error', (e) => {
-            console.error(`Async call to ${functionName} failed:`, e.message);
-        });
-
-        req.on('timeout', () => {
-            req.destroy();
-            console.error(`Async call to ${functionName} timeout`);
-        });
-
-        req.write(eventStr);
-        req.end();
-    }).catch(e => {
-        console.error(`Async resolve ${functionName} failed:`, e.message);
+async function handleBusinessLogic(event, callFunction) {
+    console.log("getcart", event);
+    let cartResponse = await callFunction("cartkvstorage", {
+        operation: "get",
+        userId: event.userId,
     });
+
+    // 从 cartkvstorage 返回的对象中提取 items 数组
+    let items = cartResponse.items || [];
+
+    // 确保 items 是数组
+    if (!Array.isArray(items)) {
+        items = [];
+    }
+
+    let cart = items.map(item => {
+        return {
+            itemId: item.itemId.S,
+            userId: item.userId.S,
+            quantity: parseInt(item.quantity.N)
+        };
+    });
+
+    return {
+        cart: cart
+        // 方案5: 移除冗余的 cartkvstorage 原始字段，减少响应体大小约 50%
+        // cartkvstorage 字段是 cart 的 DynamoDB 原始格式副本，调用方均未使用该字段
+    };
 }
 
 exports.handler = async function(event) {
     try {
         let input = typeof event === 'string' ? JSON.parse(event) : event;
-        console.log("addcartitem", input);
 
-        // 异步调用 cartkvstorage（不等待结果，与原版 sync=false 一致）
-        invokeFunctionAsync("cartkvstorage", {
-            operation: "add",
-            userId: input["userId"],
-            productId: input["productId"],
-            quantity: input["quantity"] || 1
-        });
+        const callFunction = async (functionName, params) => {
+            return await invokeFunctionViaProxy(functionName, params);
+        };
 
-        console.log("addcartitem initiated");
+        const result = await handleBusinessLogic(input, callFunction);
 
         return {
             statusCode: 200,
-            body: JSON.stringify({
-                success: true
-            })
+            body: JSON.stringify(result)
         };
     } catch (error) {
-        console.error("Error in addcartitem:", error);
+        console.error("Error in handler:", error);
         return {
             statusCode: 500,
             body: JSON.stringify({

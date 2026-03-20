@@ -1,24 +1,17 @@
-// 700.fusion-webshop/703.checkout/nodejs/function.js
+// 700.fusion-webshop/701.addcartitem/nodejs/function.js
 const http = require('http');
-const https = require('https');
-let keepAliveAgent = new http.Agent({ keepAlive: true });
-const { Worker } = require("worker_threads")
+
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 
 const PROXY_URL = process.env.PROXY_URL || '172.17.0.1:8080';
 
 function parseUrl(url) {
-    let protocol = 'http:';
-    if (url.startsWith('https://')) {
-        protocol = 'https:';
-        url = url.substring(8); // 去掉 'https://'
-    } else if (url.startsWith('http://')) {
-        url = url.substring(7); // 去掉 'http://'
-    }
+    url = url.replace(/^https?:\/\//, '');
     if (url.includes(':')) {
         const [hostname, port] = url.split(':');
-        return { hostname, port: parseInt(port), protocol };
+        return { hostname, port: parseInt(port) };
     } else {
-        return { hostname: url, port: 8080, protocol };
+        return { hostname: url, port: 8080 };
     }
 }
 
@@ -39,21 +32,20 @@ async function resolveFunctionUrl(functionName) {
 
     const { hostname, port } = parseUrl(PROXY_URL);
     const resolveOptions = {
-        agent: keepAliveAgent,
         hostname: hostname,
         port: port,
         path: `/resolve/${functionName}`,
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
-        timeout: 300000
+        timeout: 300000,
+        agent: httpAgent
     };
 
     const functionInfo = await new Promise((resolveUrl, rejectUrl) => {
         const req = http.request(resolveOptions, (res) => {
-            const chunks = [];
-            res.on('data', (chunk) => { chunks.push(chunk); });
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
             res.on('end', () => {
-                const data = Buffer.concat(chunks).toString('utf8');
                 try {
                     const parsed = JSON.parse(data);
                     if (parsed.error) {
@@ -95,7 +87,6 @@ async function invokeFunctionViaProxy(functionName, event) {
             const { hostname: funcHostname, port: funcPort } = parseUrl(functionInfo.url);
             const eventStr = JSON.stringify(event);
             const callOptions = {
-                agent: keepAliveAgent,
                 hostname: funcHostname,
                 port: funcPort,
                 path: '/',
@@ -104,14 +95,14 @@ async function invokeFunctionViaProxy(functionName, event) {
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(eventStr)
                 },
-                timeout: 600000
+                timeout: 600000,
+                agent: httpAgent
             };
 
             const req = http.request(callOptions, (res) => {
-                const chunks = [];
-                res.on('data', (chunk) => { chunks.push(chunk); });
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
                 res.on('end', () => {
-                    const data = Buffer.concat(chunks).toString('utf8');
                     try {
                         const parsed = JSON.parse(data);
 
@@ -172,7 +163,6 @@ function invokeFunctionAsync(functionName, event) {
         const eventStr = JSON.stringify(event);
         const { hostname: funcHostname, port: funcPort } = parseUrl(functionInfo.url);
         const callOptions = {
-            agent: keepAliveAgent,
             hostname: funcHostname,
             port: funcPort,
             path: '/',
@@ -205,111 +195,34 @@ function invokeFunctionAsync(functionName, event) {
     });
 }
 
-let js_string = `
-const { workerData, parentPort } = require('worker_threads');
-
-let num = workerData.num || 7
-let res = cpu_intensive(num)
-
-parentPort.postMessage(res)
-
-// https://gist.github.com/sqren/5083d73f184acae0c5b7
-function cpu_intensive(baseNumber) {
-	let result = 0;	
-	for (var i = Math.pow(baseNumber, 7); i >= 0; i--) {		
-		result += Math.atan(i) * Math.tan(i);
-	};
-    return result;
-}
-`
-
 exports.handler = async function(event) {
     try {
         let input = typeof event === 'string' ? JSON.parse(event) : event;
-        console.log("checkout", input);
+        console.log("addcartitem", input);
 
-        let userId = input.userId || "0"
-        let currencyPref = input.currency || "USD"
-
-        // 调用所有函数
-        let cart = await invokeFunctionViaProxy("getcart", {userId: userId});
-        let productsList = await invokeFunctionViaProxy("listproducts", {});
-
-        // Convert the price of all Products into the preferred currency
-        let w1 = new Promise((resolve, reject) => {
-            const worker = new Worker(js_string, {
-                workerData: {},
-                eval: true
-            })
-            worker.on("message", m => resolve(m))
-            worker.on("error", m => reject(m))
-        })
-        let w2 = new Promise((resolve, reject) => {
-            const worker = new Worker(js_string, {
-                workerData: {},
-                eval: true
-            })
-            worker.on("message", m => resolve(m))
-            worker.on("error", m => reject(m))
-        })
-
-        // 处理购物车数据（兼容新旧格式）
-        let cartItems = cart.items || (cart.cart && cart.cart.cart) || [];
-
-        // 处理产品列表数据（兼容新旧格式）
-        let products = productsList.products || (productsList.productsList && productsList.productsList.products) || productsList || [];
-
-        let orderProducts = cartItems.map(item => {
-            let itemId = item.itemId?.S || item.itemId || item.id;
-            let pr = products.find(pr => pr.id == itemId);
-            return pr;
-        }).filter(p => p != null);
-        
-        if (orderProducts.length > 0) {
-            let pricesToConvert = orderProducts.map(pr => ({ from: pr.priceUsd }));
-            let convertedPrices = await invokeFunctionViaProxy("currency", {
-                prices: pricesToConvert,
-                toCode: currencyPref
-            });
-            
-            orderProducts = orderProducts.map((pr, index) => {
-                pr.price = convertedPrices[index];
-                return pr;
-            });
-        }
-        console.log("OrderProducts", orderProducts)
-
-        let shipmentPrice = await invokeFunctionViaProxy("shipmentquote", {userId: userId, items: cartItems});
-        let convertedShipmentPrice = await invokeFunctionViaProxy("currency", {
-            from: shipmentPrice.costUsd,
-            toCode: currencyPref
+        // 异步调用 cartkvstorage（不等待结果，与原版 sync=false 一致）
+        invokeFunctionAsync("cartkvstorage", {
+            operation: "add",
+            userId: input["userId"],
+            productId: input["productId"],
+            quantity: input["quantity"] || 1
         });
 
-        // 异步调用 shiporder, email 和 emptycart（不等待结果）
-        invokeFunctionAsync("shiporder", {
-            address: input.address,
-            items: orderProducts
-        });
-        invokeFunctionAsync("email", {message: "You are shipped"});
-        invokeFunctionAsync("emptycart", {userId: userId});
-
-        // 等待 worker 完成
-        await w1;
-        await w2;
+        console.log("addcartitem initiated");
 
         return {
             statusCode: 200,
             body: JSON.stringify({
-                orderProducts: orderProducts,
-                convertedShipmentPrice: convertedShipmentPrice
+                success: true
             })
         };
     } catch (error) {
-        console.error("Error in checkout:", error);
+        console.error("Error in addcartitem:", error);
         return {
             statusCode: 500,
             body: JSON.stringify({
-                error: error.message
+                error: error.message,
+                stack: error.stack
             })
         };
     }

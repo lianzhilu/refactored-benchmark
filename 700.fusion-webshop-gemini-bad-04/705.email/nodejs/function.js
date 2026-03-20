@@ -1,24 +1,17 @@
-// 700.fusion-webshop/703.checkout/nodejs/function.js
+// 700.fusion-webshop/705.email/nodejs/function.js
 const http = require('http');
-const https = require('https');
-let keepAliveAgent = new http.Agent({ keepAlive: true });
-const { Worker } = require("worker_threads")
+const { Worker } = require("worker_threads");
 
 const PROXY_URL = process.env.PROXY_URL || '172.17.0.1:8080';
+const sharedAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
 
 function parseUrl(url) {
-    let protocol = 'http:';
-    if (url.startsWith('https://')) {
-        protocol = 'https:';
-        url = url.substring(8); // 去掉 'https://'
-    } else if (url.startsWith('http://')) {
-        url = url.substring(7); // 去掉 'http://'
-    }
+    url = url.replace(/^https?:\/\//, '');
     if (url.includes(':')) {
         const [hostname, port] = url.split(':');
-        return { hostname, port: parseInt(port), protocol };
+        return { hostname, port: parseInt(port) };
     } else {
-        return { hostname: url, port: 8080, protocol };
+        return { hostname: url, port: 8080 };
     }
 }
 
@@ -39,13 +32,13 @@ async function resolveFunctionUrl(functionName) {
 
     const { hostname, port } = parseUrl(PROXY_URL);
     const resolveOptions = {
-        agent: keepAliveAgent,
         hostname: hostname,
         port: port,
         path: `/resolve/${functionName}`,
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
-        timeout: 300000
+        timeout: 300000,
+        agent: sharedAgent
     };
 
     const functionInfo = await new Promise((resolveUrl, rejectUrl) => {
@@ -53,8 +46,8 @@ async function resolveFunctionUrl(functionName) {
             const chunks = [];
             res.on('data', (chunk) => { chunks.push(chunk); });
             res.on('end', () => {
-                const data = Buffer.concat(chunks).toString('utf8');
                 try {
+                    const data = Buffer.concat(chunks).toString('utf8');
                     const parsed = JSON.parse(data);
                     if (parsed.error) {
                         rejectUrl(new Error(`Proxy resolve failed: ${parsed.error}`));
@@ -94,26 +87,27 @@ async function invokeFunctionViaProxy(functionName, event) {
 
             const { hostname: funcHostname, port: funcPort } = parseUrl(functionInfo.url);
             const eventStr = JSON.stringify(event);
+            const eventBuf = Buffer.from(eventStr);
             const callOptions = {
-                agent: keepAliveAgent,
                 hostname: funcHostname,
                 port: funcPort,
                 path: '/',
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'Content-Length': Buffer.byteLength(eventStr)
+                    'Content-Length': eventBuf.length
                 },
-                timeout: 600000
+                timeout: 600000,
+                agent: sharedAgent
             };
 
             const req = http.request(callOptions, (res) => {
                 const chunks = [];
-                res.on('data', (chunk) => { chunks.push(chunk); });
-                res.on('end', () => {
+            res.on('data', (chunk) => { chunks.push(chunk); });
+            res.on('end', () => {
+                try {
                     const data = Buffer.concat(chunks).toString('utf8');
-                    try {
-                        const parsed = JSON.parse(data);
+                    const parsed = JSON.parse(data);
 
                         // 处理 SeBS 响应格式
                         if (parsed.result && parsed.result.output) {
@@ -156,52 +150,11 @@ async function invokeFunctionViaProxy(functionName, event) {
 
             req.on('error', (e) => reject(new Error(`Function call failed to ${functionInfo.url}: ` + e.message)));
             req.on('timeout', () => { req.destroy(); reject(new Error(`Function call timeout to ${functionInfo.url}`)); });
-            req.write(eventStr);
+            req.write(typeof eventBuf !== 'undefined' ? eventBuf : eventStr);
             req.end();
         } catch (e) {
             reject(e);
         }
-    });
-}
-
-/**
- * 异步调用函数（不等待结果，fire-and-forget）
- */
-function invokeFunctionAsync(functionName, event) {
-    resolveFunctionUrl(functionName).then(functionInfo => {
-        const eventStr = JSON.stringify(event);
-        const { hostname: funcHostname, port: funcPort } = parseUrl(functionInfo.url);
-        const callOptions = {
-            agent: keepAliveAgent,
-            hostname: funcHostname,
-            port: funcPort,
-            path: '/',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(eventStr)
-            },
-            timeout: 600000
-        };
-
-        const req = http.request(callOptions, (res) => {
-            res.on('data', () => {});
-            res.on('end', () => {});
-        });
-
-        req.on('error', (e) => {
-            console.error(`Async call to ${functionName} failed:`, e.message);
-        });
-
-        req.on('timeout', () => {
-            req.destroy();
-            console.error(`Async call to ${functionName} timeout`);
-        });
-
-        req.write(eventStr);
-        req.end();
-    }).catch(e => {
-        console.error(`Async resolve ${functionName} failed:`, e.message);
     });
 }
 
@@ -215,101 +168,53 @@ parentPort.postMessage(res)
 
 // https://gist.github.com/sqren/5083d73f184acae0c5b7
 function cpu_intensive(baseNumber) {
-	let result = 0;	
-	for (var i = Math.pow(baseNumber, 7); i >= 0; i--) {		
+	let result = 0;
+	for (var i = Math.pow(baseNumber, 7); i >= 0; i--) {
 		result += Math.atan(i) * Math.tan(i);
 	};
     return result;
 }
-`
+`;
+
+async function handleBusinessLogic(event, callFunction) {
+    
+
+    let w1 = new Promise((resolve, reject) => {
+        const worker = new Worker(js_string, {
+            workerData: {},
+            eval: true
+        });
+        worker.on("message", m => resolve(m));
+        worker.on("error", m => reject(m));
+    });
+    let r1 = await w1;
+
+    return {
+        sucess: Math.random() > 0.1
+    };
+}
 
 exports.handler = async function(event) {
     try {
         let input = typeof event === 'string' ? JSON.parse(event) : event;
-        console.log("checkout", input);
 
-        let userId = input.userId || "0"
-        let currencyPref = input.currency || "USD"
+        const callFunction = async (functionName, params) => {
+            return await invokeFunctionViaProxy(functionName, params);
+        };
 
-        // 调用所有函数
-        let cart = await invokeFunctionViaProxy("getcart", {userId: userId});
-        let productsList = await invokeFunctionViaProxy("listproducts", {});
-
-        // Convert the price of all Products into the preferred currency
-        let w1 = new Promise((resolve, reject) => {
-            const worker = new Worker(js_string, {
-                workerData: {},
-                eval: true
-            })
-            worker.on("message", m => resolve(m))
-            worker.on("error", m => reject(m))
-        })
-        let w2 = new Promise((resolve, reject) => {
-            const worker = new Worker(js_string, {
-                workerData: {},
-                eval: true
-            })
-            worker.on("message", m => resolve(m))
-            worker.on("error", m => reject(m))
-        })
-
-        // 处理购物车数据（兼容新旧格式）
-        let cartItems = cart.items || (cart.cart && cart.cart.cart) || [];
-
-        // 处理产品列表数据（兼容新旧格式）
-        let products = productsList.products || (productsList.productsList && productsList.productsList.products) || productsList || [];
-
-        let orderProducts = cartItems.map(item => {
-            let itemId = item.itemId?.S || item.itemId || item.id;
-            let pr = products.find(pr => pr.id == itemId);
-            return pr;
-        }).filter(p => p != null);
-        
-        if (orderProducts.length > 0) {
-            let pricesToConvert = orderProducts.map(pr => ({ from: pr.priceUsd }));
-            let convertedPrices = await invokeFunctionViaProxy("currency", {
-                prices: pricesToConvert,
-                toCode: currencyPref
-            });
-            
-            orderProducts = orderProducts.map((pr, index) => {
-                pr.price = convertedPrices[index];
-                return pr;
-            });
-        }
-        console.log("OrderProducts", orderProducts)
-
-        let shipmentPrice = await invokeFunctionViaProxy("shipmentquote", {userId: userId, items: cartItems});
-        let convertedShipmentPrice = await invokeFunctionViaProxy("currency", {
-            from: shipmentPrice.costUsd,
-            toCode: currencyPref
-        });
-
-        // 异步调用 shiporder, email 和 emptycart（不等待结果）
-        invokeFunctionAsync("shiporder", {
-            address: input.address,
-            items: orderProducts
-        });
-        invokeFunctionAsync("email", {message: "You are shipped"});
-        invokeFunctionAsync("emptycart", {userId: userId});
-
-        // 等待 worker 完成
-        await w1;
-        await w2;
+        const result = await handleBusinessLogic(input, callFunction);
 
         return {
             statusCode: 200,
-            body: JSON.stringify({
-                orderProducts: orderProducts,
-                convertedShipmentPrice: convertedShipmentPrice
-            })
+            body: JSON.stringify(result)
         };
     } catch (error) {
-        console.error("Error in checkout:", error);
+        console.error("Error in handler:", error);
         return {
             statusCode: 500,
             body: JSON.stringify({
-                error: error.message
+                error: error.message,
+                stack: error.stack
             })
         };
     }

@@ -1,23 +1,17 @@
-// 700.fusion-webshop/701.addcartitem/nodejs/function.js
+// 700.fusion-webshop/711.listproducts/nodejs/function.js
 const http = require('http');
-const https = require('https');
-let keepAliveAgent = new http.Agent({ keepAlive: true });
+
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 
 const PROXY_URL = process.env.PROXY_URL || '172.17.0.1:8080';
 
 function parseUrl(url) {
-    let protocol = 'http:';
-    if (url.startsWith('https://')) {
-        protocol = 'https:';
-        url = url.substring(8); // 去掉 'https://'
-    } else if (url.startsWith('http://')) {
-        url = url.substring(7); // 去掉 'http://'
-    }
+    url = url.replace(/^https?:\/\//, '');
     if (url.includes(':')) {
         const [hostname, port] = url.split(':');
-        return { hostname, port: parseInt(port), protocol };
+        return { hostname, port: parseInt(port) };
     } else {
-        return { hostname: url, port: 8080, protocol };
+        return { hostname: url, port: 8080 };
     }
 }
 
@@ -36,24 +30,22 @@ async function resolveFunctionUrl(functionName) {
         return { ...cached };
     }
 
-    const { hostname, port, protocol } = parseUrl(PROXY_URL);
+    const { hostname, port } = parseUrl(PROXY_URL);
     const resolveOptions = {
-        agent: protocol === 'https:' ? new https.Agent({ keepAlive: true }) : keepAliveAgent,
         hostname: hostname,
         port: port,
         path: `/resolve/${functionName}`,
         method: 'GET',
         headers: { 'Content-Type': 'application/json' },
-        timeout: 300000
+        timeout: 300000,
+        agent: httpAgent
     };
 
     const functionInfo = await new Promise((resolveUrl, rejectUrl) => {
-        const requestModule = protocol === 'https:' ? https : http;
-        const req = requestModule.request(resolveOptions, (res) => {
-            const chunks = [];
-            res.on('data', (chunk) => { chunks.push(chunk); });
+        const req = http.request(resolveOptions, (res) => {
+            let data = '';
+            res.on('data', (chunk) => { data += chunk; });
             res.on('end', () => {
-                const data = Buffer.concat(chunks).toString('utf8');
                 try {
                     const parsed = JSON.parse(data);
                     if (parsed.error) {
@@ -92,10 +84,9 @@ async function invokeFunctionViaProxy(functionName, event) {
         try {
             const functionInfo = await resolveFunctionUrl(functionName);
 
-            const { hostname: funcHostname, port: funcPort, protocol } = parseUrl(functionInfo.url);
+            const { hostname: funcHostname, port: funcPort } = parseUrl(functionInfo.url);
             const eventStr = JSON.stringify(event);
             const callOptions = {
-                agent: protocol === 'https:' ? new https.Agent({ keepAlive: true }) : keepAliveAgent,
                 hostname: funcHostname,
                 port: funcPort,
                 path: '/',
@@ -104,15 +95,14 @@ async function invokeFunctionViaProxy(functionName, event) {
                     'Content-Type': 'application/json',
                     'Content-Length': Buffer.byteLength(eventStr)
                 },
-                timeout: 600000
+                timeout: 600000,
+                agent: httpAgent
             };
 
-            const requestModule = protocol === 'https:' ? https : http;
-            const req = requestModule.request(callOptions, (res) => {
-                const chunks = [];
-                res.on('data', (chunk) => { chunks.push(chunk); });
+            const req = http.request(callOptions, (res) => {
+                let data = '';
+                res.on('data', (chunk) => { data += chunk; });
                 res.on('end', () => {
-                    const data = Buffer.concat(chunks).toString('utf8');
                     try {
                         const parsed = JSON.parse(data);
 
@@ -165,71 +155,164 @@ async function invokeFunctionViaProxy(functionName, event) {
     });
 }
 
-/**
- * 异步调用函数（不等待结果，fire-and-forget）
- */
-function invokeFunctionAsync(functionName, event) {
-    resolveFunctionUrl(functionName).then(functionInfo => {
-        const eventStr = JSON.stringify(event);
-        const { hostname: funcHostname, port: funcPort, protocol } = parseUrl(functionInfo.url);
-        const callOptions = {
-            agent: protocol === 'https:' ? new https.Agent({ keepAlive: true }) : keepAliveAgent,
-            hostname: funcHostname,
-            port: funcPort,
-            path: '/',
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(eventStr)
-            },
-            timeout: 600000
-        };
+let products = [
+    {
+        "id": "1",
+        "name": "T-Shirt",
+        "description": "For those who know how to code like a boss!",
+        "picture": "programmer_tshirt.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 24,
+            "nanos": 990000000
+        },
+        "categories": ["clothing", "programming"]
+    },
+    {
+        "id": "2",
+        "name": "Coffee Mug",
+        "description": "For those all-nighters coding sessions.",
+        "picture": "coffee_mug.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 14,
+            "nanos": 990000000
+        },
+        "categories": ["kitchen", "programming"]
+    },
+    {
+        "id": "3",
+        "name": "Computer Mouse",
+        "description": "For those who like to point and click, not just point and talk.",
+        "picture": "computer_mouse.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 34,
+            "nanos": 990000000
+        },
+        "categories": ["electronics", "computers"]
+    },
+    {
+        "id": "4",
+        "name": "Keyboard",
+        "description": "For those who prefer to express themselves through typing.",
+        "picture": "keyboard.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 44,
+            "nanos": 990000000
+        },
+        "categories": ["electronics", "computers"]
+    },
+    {
+        "id": "5",
+        "name": "Monitor",
+        "description": "For those who like to keep an eye on things.",
+        "picture": "monitor.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 64,
+            "nanos": 990000000
+        },
+        "categories": ["electronics", "computers"]
+    },
+    {
+        "id": "6",
+        "name": "Headphones",
+        "description": "For those who like to code in silence... or with music.",
+        "picture": "headphones.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 74,
+            "nanos": 990000000
+        },
+        "categories": ["electronics", "computers"]
+    },
+    {
+        "id": "7",
+        "name": "Computer Case",
+        "description": "For those who like to keep their computer looking good and running cool.",
+        "picture": "computer_case.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 84,
+            "nanos": 990000000
+        },
+        "categories": ["electronics", "computers"]
+    },
+    {
+        "id": "8",
+        "name": "Programmer Hoodie",
+        "description": "Stay warm and cozy while coding the night away!",
+        "picture": "programmer_hoodie.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 39,
+            "nanos": 990000000
+        },
+        "categories": ["clothing", "programming"]
+    },
+    {
+        "id": "9",
+        "name": "Programmer Scarf",
+        "description": "Stay stylish and warm during those cold programming sessions.",
+        "picture": "programmer_scarf.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 29,
+            "nanos": 990000000
+        },
+        "categories": ["clothing", "programming"]
+    },
+    {
+        "id": "10",
+        "name": "Programmer Apron",
+        "description": "Keep your clothes clean while you cook up some code!",
+        "picture": "programmer_apron.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 19,
+            "nanos": 990000000
+        },
+        "categories": ["kitchen", "programming"]
+    },
+    {
+        "id": "11",
+        "name": "Programmer Lunchbox",
+        "description": "Take your programming skills to lunch with you!",
+        "picture": "programmer_lunchbox.jpg",
+        "priceUsd": {
+            "currencyCode": "USD",
+            "units": 12,
+            "nanos": 990000000
+        },
+        "categories": ["kitchen", "programming"]
+    }
+];
 
-        const requestModule = protocol === 'https:' ? https : http;
-        const req = requestModule.request(callOptions, (res) => {
-            res.on('data', () => {});
-            res.on('end', () => {});
-        });
-
-        req.on('error', (e) => {
-            console.error(`Async call to ${functionName} failed:`, e.message);
-        });
-
-        req.on('timeout', () => {
-            req.destroy();
-            console.error(`Async call to ${functionName} timeout`);
-        });
-
-        req.write(eventStr);
-        req.end();
-    }).catch(e => {
-        console.error(`Async resolve ${functionName} failed:`, e.message);
-    });
+async function handleBusinessLogic(event, callFunction) {
+    console.log("listproducts", event);
+    return {
+        products: products
+    };
 }
 
 exports.handler = async function(event) {
     try {
         let input = typeof event === 'string' ? JSON.parse(event) : event;
-        console.log("addcartitem", input);
 
-        // 异步调用 cartkvstorage（不等待结果，与原版 sync=false 一致）
-        invokeFunctionAsync("cartkvstorage", {
-            operation: "add",
-            userId: input["userId"],
-            productId: input["productId"],
-            quantity: input["quantity"] || 1
-        });
+        const callFunction = async (functionName, params) => {
+            return await invokeFunctionViaProxy(functionName, params);
+        };
 
-        console.log("addcartitem initiated");
+        const result = await handleBusinessLogic(input, callFunction);
 
         return {
             statusCode: 200,
-            body: JSON.stringify({
-                success: true
-            })
+            body: JSON.stringify(result)
         };
     } catch (error) {
-        console.error("Error in addcartitem:", error);
+        console.error("Error in handler:", error);
         return {
             statusCode: 500,
             body: JSON.stringify({
