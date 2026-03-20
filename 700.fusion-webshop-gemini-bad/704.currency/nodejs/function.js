@@ -1,0 +1,273 @@
+// 700.fusion-webshop/704.currency/nodejs/function.js
+const http = require('http');
+const keepAliveAgent = new http.Agent({ keepAlive: true });
+
+const PROXY_URL = process.env.PROXY_URL || '172.17.0.1:8080';
+
+function parseUrl(url) {
+    url = url.replace(/^https?:\/\//, '');
+    if (url.includes(':')) {
+        const [hostname, port] = url.split(':');
+        return { hostname, port: parseInt(port) };
+    } else {
+        return { hostname: url, port: 8080 };
+    }
+}
+
+/**
+ * URL缓存：避免重复 resolve 同一个函数
+ */
+const functionUrlCache = {};
+
+/**
+ * 从代理服务解析函数URL（带缓存）
+ */
+async function resolveFunctionUrl(functionName) {
+    // 检查缓存
+    if (functionUrlCache[functionName]) {
+        const cached = functionUrlCache[functionName];
+        return { ...cached };
+    }
+
+    const { hostname, port } = parseUrl(PROXY_URL);
+    const resolveOptions = {
+        agent: keepAliveAgent,
+        hostname: hostname,
+        port: port,
+        path: `/resolve/${functionName}`,
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 300000
+    };
+
+    const functionInfo = await new Promise((resolveUrl, rejectUrl) => {
+        const req = http.request(resolveOptions, (res) => {
+            const chunks = [];
+            res.on('data', (chunk) => { chunks.push(chunk); });
+            res.on('end', () => {
+                const data = Buffer.concat(chunks).toString('utf8');
+                try {
+                    const parsed = JSON.parse(data);
+                    if (parsed.error) {
+                        rejectUrl(new Error(`Proxy resolve failed: ${parsed.error}`));
+                    } else if (parsed.url) {
+                        resolveUrl(parsed);
+                    } else {
+                        rejectUrl(new Error('Invalid response from proxy: missing url'));
+                    }
+                } catch (e) {
+                    rejectUrl(new Error('Failed to parse proxy response: ' + e.message));
+                }
+            });
+        });
+        req.on('error', (e) => rejectUrl(new Error('Failed to resolve function URL: ' + e.message)));
+        req.on('timeout', () => { req.destroy(); rejectUrl(new Error('Resolve request timeout')); });
+        req.end();
+    });
+
+    // 存入缓存
+    functionUrlCache[functionName] = {
+        url: functionInfo.url,
+        container_id: functionInfo.container_id,
+        benchmark: functionInfo.benchmark,
+        timestamp: Date.now()
+    };
+
+    return functionInfo;
+}
+
+/**
+ * 通过代理服务调用其他函数（同步，等待结果）
+ */
+async function invokeFunctionViaProxy(functionName, event) {
+    return new Promise(async (resolve, reject) => {
+        try {
+            const functionInfo = await resolveFunctionUrl(functionName);
+
+            const { hostname: funcHostname, port: funcPort } = parseUrl(functionInfo.url);
+            const eventStr = JSON.stringify(event);
+            const callOptions = {
+                agent: keepAliveAgent,
+                hostname: funcHostname,
+                port: funcPort,
+                path: '/',
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Content-Length': Buffer.byteLength(eventStr)
+                },
+                timeout: 600000
+            };
+
+            const req = http.request(callOptions, (res) => {
+                const chunks = [];
+                res.on('data', (chunk) => { chunks.push(chunk); });
+                res.on('end', () => {
+                    const data = Buffer.concat(chunks).toString('utf8');
+                    try {
+                        const parsed = JSON.parse(data);
+
+                        // 处理 SeBS 响应格式
+                        if (parsed.result && parsed.result.output) {
+                            const output = parsed.result.output;
+                            if (output.body) {
+                                const body = typeof output.body === 'string'
+                                    ? JSON.parse(output.body)
+                                    : output.body;
+                                if (body.error) {
+                                    reject(new Error(body.error));
+                                } else {
+                                    resolve(body);
+                                }
+                                return;
+                            }
+                        }
+
+                        // 处理标准 HTTP 响应格式
+                        if (parsed.body) {
+                            const body = typeof parsed.body === 'string'
+                                ? JSON.parse(parsed.body)
+                                : parsed.body;
+                            if (body.error) {
+                                reject(new Error(body.error));
+                            } else {
+                                resolve(body);
+                            }
+                        } else {
+                            if (parsed.error) {
+                                reject(new Error(parsed.error));
+                            } else {
+                                resolve(parsed);
+                            }
+                        }
+                    } catch (e) {
+                        reject(new Error('Failed to parse response: ' + e.message + ' | Data: ' + data.substring(0, 200)));
+                    }
+                });
+            });
+
+            req.on('error', (e) => reject(new Error(`Function call failed to ${functionInfo.url}: ` + e.message)));
+            req.on('timeout', () => { req.destroy(); reject(new Error(`Function call timeout to ${functionInfo.url}`)); });
+            req.write(eventStr);
+            req.end();
+        } catch (e) {
+            reject(e);
+        }
+    });
+}
+
+// Below here is directly from Befaas - its awesome
+const EUR_RATES = {
+    EUR: 1.0,
+    CAD: 1.5231,
+    HKD: 8.3693,
+    ISK: 157.5,
+    PHP: 54.778,
+    DKK: 7.4576,
+    HUF: 354.7,
+    CZK: 27.589,
+    AUD: 1.6805,
+    RON: 4.84,
+    SEK: 10.6695,
+    IDR: 16127.82,
+    INR: 81.9885,
+    BRL: 6.3172,
+    RUB: 79.6208,
+    HRK: 7.5693,
+    JPY: 115.53,
+    THB: 34.656,
+    CHF: 1.0513,
+    SGD: 1.5397,
+    PLN: 4.565,
+    BGN: 1.9558,
+    TRY: 7.4689,
+    CNY: 7.6759,
+    NOK: 11.0568,
+    NZD: 1.8145,
+    ZAR: 20.0761,
+    USD: 1.0798,
+    MXN: 25.8966,
+    ILS: 3.8178,
+    GBP: 0.88738,
+    KRW: 1332.6,
+    MYR: 4.6982
+};
+
+function getRate(from, to) {
+    return EUR_RATES[to] / EUR_RATES[from];
+}
+
+function symmetricFloor(amount) {
+    if (amount > 0) {
+        return Math.floor(amount);
+    } else {
+        return Math.ceil(amount);
+    }
+}
+
+function applyRate(units, nanos, rate) {
+    const rawUnits = units * rate;
+    const newUnits = symmetricFloor(rawUnits);
+
+    const addedNanos = (rawUnits - newUnits) * 1e9;
+    const newNanos = symmetricFloor(nanos * rate + addedNanos);
+
+    const addedUnits = symmetricFloor(newNanos / 999999999);
+
+    const finalUnits = newUnits + addedUnits;
+    const finalNanos = symmetricFloor(newNanos % 999999999);
+
+    return [finalUnits, finalNanos];
+}
+
+/**
+ * 业务逻辑处理函数
+ * 处理货币转换
+ */
+async function handleBusinessLogic(event, callFunction) {
+    console.log("currency", event);
+
+    // Support batch conversion
+    if (event.prices && Array.isArray(event.prices)) {
+        return event.prices.map(price => {
+            const rate = getRate(price.from.currencyCode, event.toCode);
+            const [convUnits, convNanos] = applyRate(price.from.units, price.from.nanos, rate);
+            return { units: convUnits, nanos: convNanos, currencyCode: event.toCode };
+        });
+    }
+
+    const rate = getRate(event.from.currencyCode, event.toCode);
+    const [convUnits, convNanos] = applyRate(event.from.units, event.from.nanos, rate);
+
+    // carry over fractions from units
+    return { units: convUnits, nanos: convNanos, currencyCode: event.toCode };
+}
+
+/**
+ * Lambda 入口函数
+ */
+exports.handler = async function(event) {
+    try {
+        let input = typeof event === 'string' ? JSON.parse(event) : event;
+
+        const callFunction = async (functionName, params) => {
+            return await invokeFunctionViaProxy(functionName, params);
+        };
+
+        const result = await handleBusinessLogic(input, callFunction);
+
+        return {
+            statusCode: 200,
+            body: JSON.stringify(result)
+        };
+    } catch (error) {
+        console.error("Error in handler:", error);
+        return {
+            statusCode: 500,
+            body: JSON.stringify({
+                error: error.message,
+                stack: error.stack
+            })
+        };
+    }
+};

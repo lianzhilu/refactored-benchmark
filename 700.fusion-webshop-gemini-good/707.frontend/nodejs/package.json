@@ -1,0 +1,10 @@
+{
+  "name": "webshop-function",
+  "version": "1.0.0",
+  "description": "Webshop function - migrated from functionfusion webshop",
+  "main": "function.js",
+  "dependencies": {
+    "aws-sdk": "^2.1691.0"
+  }
+}
+
